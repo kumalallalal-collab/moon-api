@@ -1,0 +1,110 @@
+const express = require('express');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json());
+
+// In-memory storage
+const reports = {};
+const EXPIRY_MS = 5 * 60 * 1000; // 5 minutes freshness
+const FOUR_HOURS_SECS = 4 * 3600; // 14400
+
+// ─── Health check (Render uses this) ───
+app.get('/', (req, res) => res.send('API online'));
+
+// ─── Report from scanner ───
+app.post('/api/report', (req, res) => {
+    const { jobId, moonPhase, secsUntilChalice, serverUptime } = req.body;
+
+    if (!jobId || typeof moonPhase !== 'number') {
+        return res.status(400).json({ error: 'Missing jobId or moonPhase' });
+    }
+
+    reports[jobId] = {
+        moonPhase,
+        secsUntilChalice,
+        serverUptime,
+        lastReport: Date.now(),
+    };
+
+    console.log(`[REPORT] ${jobId.slice(0,8)}... | moon=${moonPhase} | chalice=${secsUntilChalice}s`);
+    res.json({ ok: true, totalServers: Object.keys(reports).length });
+});
+
+// ─── Find full-moon servers ───
+app.get('/api/find/fullmoon', (req, res) => {
+    const now = Date.now();
+    const matches = [];
+
+    for (const jobId in reports) {
+        const r = reports[jobId];
+        if (now - r.lastReport > EXPIRY_MS) {
+            delete reports[jobId];
+            continue;
+        }
+        if (r.moonPhase === 5) matches.push(jobId);
+    }
+
+    matches.sort(() => Math.random() - 0.5);
+    res.json({ servers: matches, count: matches.length });
+});
+
+// ─── Find servers within N seconds of the 4h chalice spawn ───
+app.get('/api/find/chalice', (req, res) => {
+    const maxWait = parseInt(req.query.max || '600'); // default 10 min
+    const now = Date.now();
+    const matches = [];
+
+    for (const jobId in reports) {
+        const r = reports[jobId];
+
+        if (now - r.lastReport > EXPIRY_MS) {
+            delete reports[jobId];
+            continue;
+        }
+
+        if (typeof r.secsUntilChalice !== 'number') continue;
+
+        const ageSecs = Math.floor((now - r.lastReport) / 1000);
+        const remaining = r.secsUntilChalice - ageSecs;
+
+        // Within `maxWait` seconds BEFORE the chalice spawns
+        if (remaining > 0 && remaining <= maxWait) {
+            matches.push({ jobId, secsUntilChalice: remaining });
+        }
+    }
+
+    matches.sort((a, b) => a.secsUntilChalice - b.secsUntilChalice);
+
+    console.log(`[FIND chalice] ${matches.length} server(s) within ${maxWait}s`);
+    res.json({
+        servers: matches.map(m => m.jobId),
+        details: matches,
+    });
+});
+
+// ─── Debug: see all live servers ───
+app.get('/api/status', (req, res) => {
+    const now = Date.now();
+    const live = {};
+
+    for (const jobId in reports) {
+        if (now - reports[jobId].lastReport <= EXPIRY_MS) {
+            live[jobId] = {
+                moonPhase: reports[jobId].moonPhase,
+                secsUntilChalice: reports[jobId].secsUntilChalice,
+                serverUptime: reports[jobId].serverUptime,
+                ageSeconds: Math.floor((now - reports[jobId].lastReport) / 1000),
+            };
+        }
+    }
+
+    res.json({
+        totalServers: Object.keys(live).length,
+        servers: live,
+    });
+});
+
+app.listen(PORT, () => {
+    console.log(`✅ API running on port ${PORT}`);
+});
